@@ -39,7 +39,12 @@ class AudioPlayer:
         self._decoder = decoder
         self._frame_size = frame_size
         self._silence = b"\x00\x00" * frame_size
-        self._buffer = JitterBuffer(target_frames, max_buffered)
+        # Share the same ceiling as the PLC cutoff below: once concealment
+        # would go inaudible/silent anyway, the jitter buffer should also
+        # stop chasing the old sequence and re-prime on the next real packet
+        # instead of drifting further ahead (see JitterBuffer.get_next_frame).
+        self._buffer = JitterBuffer(target_frames, max_buffered,
+                                     max_consecutive_misses=_PLC_CEILING)
         self._consecutive_plc = 0
         self._last_real_ts: float = 0.0
 
