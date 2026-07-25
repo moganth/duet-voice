@@ -190,15 +190,34 @@ class VoiceSession:
             return
         audio_cfg = self.config.audio
 
-        self._mic = MicCapture(
-            audio_cfg.sample_rate, self.frame_size, audio_cfg.input_device, audio_cfg.mic_gain
-        )
-        self._speaker = SpeakerPlayback(
-            audio_cfg.sample_rate, self.frame_size, audio_cfg.output_device,
-            pull_frame_callback=self._player.get_next_pcm if self._player else None,
-        )
-        self._mic.start()
-        self._speaker.start()
+        try:
+            self._mic = MicCapture(
+                audio_cfg.sample_rate, self.frame_size, audio_cfg.input_device, audio_cfg.mic_gain
+            )
+            self._speaker = SpeakerPlayback(
+                audio_cfg.sample_rate, self.frame_size, audio_cfg.output_device,
+                pull_frame_callback=self._player.get_next_pcm if self._player else None,
+            )
+            self._mic.start()
+            self._speaker.start()
+        except Exception:
+            # Don't leave a half-open stream behind on failure (e.g. an
+            # ambiguous/unplugged device) - without this, self._mic could
+            # stay non-None forever, permanently blocking
+            # is_safe_to_reinit_portaudio and any future start_audio() retry.
+            if self._mic:
+                try:
+                    self._mic.stop()
+                except Exception:
+                    pass
+                self._mic = None
+            if self._speaker:
+                try:
+                    self._speaker.stop()
+                except Exception:
+                    pass
+                self._speaker = None
+            raise
 
         self._audio_running = True
         self._sender_thread = threading.Thread(target=self._sender_loop, name="mic-sender", daemon=True)
@@ -301,17 +320,43 @@ class VoiceSession:
 
     def switch_audio_device(self, device: Optional[str]) -> None:
         """Hot-swap both input and output streams to device without
-        disconnecting the network link.  Pass None for the system default."""
+        disconnecting the network link.  Pass None for the system default.
+
+        If the new device fails to open (e.g. it was just unplugged, or a
+        name collides across host APIs), rolls back to the previous device
+        so the call keeps working instead of being left silently dead."""
         was_running = self._audio_running
+        previous_input = self.config.audio.input_device
+        previous_output = self.config.audio.output_device
+
         if was_running:
             self.stop_audio()
             if self._player:
                 self._player.reset()
+
         self.config.audio.input_device = device
         self.config.audio.output_device = device
-        log.info("Audio device switched to: %s", device or "(system default)")
-        if was_running:
+
+        if not was_running:
+            log.info("Audio device set to: %s (will apply on next connect)", device or "(system default)")
+            return
+
+        try:
             self.start_audio()
+            log.info("Audio device switched to: %s", device or "(system default)")
+        except Exception as exc:
+            log.error(
+                "Failed to switch to device %s: %s - reverting to previous device",
+                device or "(system default)", exc,
+            )
+            self.config.audio.input_device = previous_input
+            self.config.audio.output_device = previous_output
+            try:
+                self.start_audio()
+                log.info("Reverted to previous audio device: %s", previous_input or "(system default)")
+            except Exception as exc2:
+                log.error("Rollback to previous device also failed: %s - audio pipeline is stopped", exc2)
+            raise
 
     def set_mic_gain(self, gain: float) -> None:
         """Update microphone gain live without restarting the audio stream."""

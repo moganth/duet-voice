@@ -86,6 +86,13 @@ class TrayApp:
             except Exception as exc:
                 log.error("Connect failed: %s", exc)
                 self._icon.notify(f"Connect failed: {exc}", "Duet Voice")
+                # start_audio() can fail after connect() already succeeded
+                # (e.g. an ambiguous/unplugged device) - without this the
+                # session is left "connected" with no audio pipeline at all,
+                # which looks like total communication failure. Back all the
+                # way out so the tray shows Disconnected and the user can
+                # retry cleanly.
+                self._session.disconnect()
             self._refresh()
         threading.Thread(target=worker, daemon=True).start()
 
@@ -169,13 +176,14 @@ class TrayApp:
         returns the same startup snapshot, so comparing it each poll gives
         current == last forever regardless of plug/unplug events.
 
-        Fix: call sd._terminate() + sd._initialize() before each query to
-        force PortAudio to re-enumerate WASAPI endpoints from Windows.
-        Guard: NEVER terminate while streams are open - that crashes the active
-        MicCapture / SpeakerPlayback streams.  is_audio_running is False when
-        no streams exist (before a call or after disconnect)."""
-        import sounddevice as sd
-        from services.audio_service import get_audio_devices
+        Fix: reinit_portaudio_if_safe() calls sd._terminate() + sd._initialize()
+        before each query to force PortAudio to re-enumerate WASAPI endpoints
+        from Windows. Guard: NEVER terminate while streams are open - that
+        crashes the active MicCapture / SpeakerPlayback streams. The check is
+        done twice - once here, once again under the lock inside
+        reinit_portaudio_if_safe() - to close the race where a connect/switch
+        starts opening streams in the tiny window between the two checks."""
+        from services.audio_service import get_audio_devices, reinit_portaudio_if_safe
 
         def _monitor() -> None:
             try:
@@ -185,11 +193,7 @@ class TrayApp:
             while True:
                 time.sleep(2.0)
                 try:
-                    # Re-init PortAudio so WASAPI re-enumerates current devices.
-                    # Skip if audio streams are active to avoid crashing them.
-                    if self._session.is_safe_to_reinit_portaudio:
-                        sd._terminate()
-                        sd._initialize()
+                    reinit_portaudio_if_safe(lambda: self._session.is_safe_to_reinit_portaudio)
                     current = tuple(get_audio_devices())
                     if current != last:
                         last = current
