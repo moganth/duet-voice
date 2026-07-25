@@ -8,6 +8,7 @@ from __future__ import annotations
 import queue
 import sys
 import threading
+import time
 from typing import Optional
 
 import numpy as np
@@ -60,6 +61,57 @@ def get_audio_devices(kind: str = "input") -> list[str]:
     if live is not None:
         return live
     return _portaudio_device_names(kind)
+
+
+def _device_group_key(name: str) -> str:
+    """Extract the parenthesised hardware suffix Windows appends to audio
+    endpoint names, e.g. "Headset (Buds fe)" / "Headphones (Buds fe)" both
+    key to "Buds fe". Used to merge the separate input/output endpoints a
+    single physical device (typically Bluetooth) is split into under one
+    entry in the tray's unified device picker, instead of showing two
+    differently-named, easily-confused entries for the same earbuds."""
+    if name.endswith(")") and "(" in name:
+        return name[name.rindex("(") + 1:-1].strip()
+    return name
+
+
+def get_audio_device_groups() -> list[dict]:
+    """Return one entry per physical device for the tray's single unified
+    "Audio Device" menu: {"label": str, "input": Optional[str], "output": Optional[str]}.
+
+    Merges the input and output endpoint names that share the same
+    _device_group_key() (e.g. a Bluetooth headset's separate mic/speaker
+    endpoints) into one entry, so the user picks one physical device and
+    both directions switch together - matching how Windows' own sound
+    picker presents it, and avoiding the "why are there two entries for
+    one device" confusion.
+    """
+    inputs = get_audio_devices("input")
+    outputs = get_audio_devices("output")
+
+    groups: dict[str, dict] = {}
+    order: list[str] = []
+
+    def _ensure(key: str) -> dict:
+        if key not in groups:
+            groups[key] = {"label": key, "input": None, "output": None}
+            order.append(key)
+        return groups[key]
+
+    for name in inputs:
+        _ensure(_device_group_key(name))["input"] = name
+    for name in outputs:
+        _ensure(_device_group_key(name))["output"] = name
+
+    result = []
+    for key in order:
+        g = groups[key]
+        if g["input"] and g["output"] and g["input"] != g["output"]:
+            label = key  # e.g. "Buds fe" instead of "Headset (Buds fe)" / "Headphones (Buds fe)"
+        else:
+            label = g["input"] or g["output"] or key
+        result.append({"label": label, "input": g["input"], "output": g["output"]})
+    return result
 
 
 def _live_endpoint_names(kind: str) -> Optional[list[str]]:
@@ -176,6 +228,33 @@ def _resolve_device_index(name: Optional[str], kind: str) -> Optional[int]:
     return matches[0]
 
 
+def _open_stream_with_retry(open_fn, retries: int = 2, delay: float = 0.35):
+    """Call open_fn() (which constructs an sd.InputStream/OutputStream),
+    retrying after a short pause if PortAudio raises.
+
+    Rapidly closing one stream and opening another that requires the same
+    Bluetooth radio to switch profile (e.g. a headset's HFP mic and its
+    separate A2DP speaker endpoint) can race Windows' teardown of the
+    previous audio session, surfacing as a transient PaErrorCode -9999
+    ("WdmSyncIoctl"/host error). Giving it a moment to settle before
+    retrying resolves most of these without the caller having to fall back
+    to a different device."""
+    last_exc: Optional[Exception] = None
+    for attempt in range(retries + 1):
+        try:
+            return open_fn()
+        except sd.PortAudioError as exc:
+            last_exc = exc
+            if attempt < retries:
+                log.warning(
+                    "Stream open failed (attempt %d/%d): %s - retrying shortly...",
+                    attempt + 1, retries + 1, exc,
+                )
+                time.sleep(delay)
+    assert last_exc is not None
+    raise last_exc
+
+
 class _MicAGC:
     """Adaptive gain control for the microphone.
 
@@ -264,14 +343,14 @@ class MicCapture:
         self._queue: "queue.Queue[bytes]" = queue.Queue(maxsize=50)
         with _portaudio_lock:
             resolved = _resolve_device_index(device, "input")
-            self._stream = sd.InputStream(
+            self._stream = _open_stream_with_retry(lambda: sd.InputStream(
                 samplerate=sample_rate,
                 channels=1,
                 dtype="int16",
                 blocksize=frame_size,
                 device=resolved,
                 callback=self._callback,
-            )
+            ))
 
     def _callback(self, indata, frames, time_info, status):
         if status:
@@ -325,14 +404,14 @@ class SpeakerPlayback:
         self._silence = b"\x00\x00" * frame_size
         with _portaudio_lock:
             resolved = _resolve_device_index(device, "output")
-            self._stream = sd.OutputStream(
+            self._stream = _open_stream_with_retry(lambda: sd.OutputStream(
                 samplerate=sample_rate,
                 channels=1,
                 dtype="int16",
                 blocksize=frame_size,
                 device=resolved,
                 callback=self._callback,
-            )
+            ))
 
     def _callback(self, outdata, frames, time_info, status):
         if status:

@@ -81,7 +81,7 @@ def main() -> None:
     def on_quit():
         return None
 
-    tray = TrayApp(session, on_quit)
+    tray = TrayApp(session, on_quit, config_path=args.config)
 
     if not args.no_autoconnect:
         import threading

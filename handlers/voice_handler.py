@@ -312,23 +312,14 @@ class VoiceSession:
         """Currently configured speaker device name (None = system default)."""
         return self.config.audio.output_device
 
-    def switch_input_device(self, device: Optional[str]) -> None:
-        """Hot-swap only the microphone, keeping the current speaker device."""
-        self._switch_devices(device, self.config.audio.output_device)
-
-    def switch_output_device(self, device: Optional[str]) -> None:
-        """Hot-swap only the speaker, keeping the current microphone device."""
-        self._switch_devices(self.config.audio.input_device, device)
-
-    def _switch_devices(self, input_device: Optional[str], output_device: Optional[str]) -> None:
+    def switch_devices(self, input_device: Optional[str], output_device: Optional[str]) -> None:
         """Hot-swap the input and/or output stream to new devices without
         disconnecting the network link. Pass None for the system default.
 
         If the new selection fails to open (e.g. it was just unplugged, or
-        a device that doesn't support the requested direction - such as a
-        Bluetooth "Headphones" A2DP endpoint picked as a microphone), rolls
-        back to the previous devices so the call keeps working instead of
-        being left silently dead."""
+        two BlueTooth profiles it needs conflict), rolls back to the
+        previous devices so the call keeps working instead of being left
+        silently dead."""
         was_running = self._audio_running
         previous_input = self.config.audio.input_device
         previous_output = self.config.audio.output_device

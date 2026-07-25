@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import threading
 import time
+from pathlib import Path
 from typing import Callable, Optional
 
 import pystray
@@ -33,9 +34,11 @@ _ICON_WARNING = _make_icon_image("#FAA61A")     # orange - connected but link ma
 
 
 class TrayApp:
-    def __init__(self, session: VoiceSession, on_quit: Callable[[], None]):
+    def __init__(self, session: VoiceSession, on_quit: Callable[[], None],
+                 config_path: Optional[Path] = None):
         self._session = session
         self._on_quit = on_quit
+        self._config_path = config_path
         self._icon = pystray.Icon(
             "duet-voice", _ICON_IDLE, "Duet Voice", menu=self._build_menu()
         )
@@ -54,8 +57,7 @@ class TrayApp:
                               visible=lambda item: self._session.is_connected),
             pystray.MenuItem("Mute", self._on_toggle_mute, checked=lambda item: self._session.is_muted),
             pystray.Menu.SEPARATOR,
-            pystray.MenuItem("Microphone", pystray.Menu(lambda: self._device_menu_items("input"))),
-            pystray.MenuItem("Speaker", pystray.Menu(lambda: self._device_menu_items("output"))),
+            pystray.MenuItem("Audio Device", pystray.Menu(lambda: self._device_menu_items())),
             pystray.MenuItem("Mic Boost", self._build_gain_submenu()),
             pystray.Menu.SEPARATOR,
             pystray.MenuItem("Quit", self._on_quit_clicked),
@@ -114,36 +116,44 @@ class TrayApp:
 
     # ---- audio device & gain controls --------------------------------------
 
-    def _device_menu_items(self, kind: str):
-        """Generator called fresh every time the Microphone/Speaker submenu
-        opens. get_audio_devices() queries Windows directly (see
+    def _device_menu_items(self):
+        """Generator called fresh every time the Audio Device submenu opens.
+        get_audio_device_groups() queries Windows directly (see
         services/audio_service.py) so hot-plugged devices appear
         immediately without an app restart or manual refresh - even mid-call.
 
-        Each submenu is filtered to devices that actually support that
-        direction, so e.g. a Bluetooth headset's output-only "Headphones"
-        (A2DP) endpoint only ever shows up under Speaker, while its
-        "Headset" (HFP, has a mic) endpoint can show under both - instead of
-        one flat, confusing list with no way to tell which is which."""
-        from services.audio_service import get_audio_devices
-
-        def _current() -> Optional[str]:
-            return self._session.current_input_device if kind == "input" else self._session.current_output_device
+        Each entry represents one physical device, not one PortAudio
+        endpoint: a Bluetooth headset's separate mic (HFP) and speaker
+        (A2DP) endpoints are merged into a single entry so picking it
+        switches both directions together - matching Windows' own sound
+        picker instead of showing two confusingly-named entries for the
+        same earbuds."""
+        from services.audio_service import get_audio_device_groups
 
         yield pystray.MenuItem(
             "(system default)",
-            self._make_device_action(kind, None),
-            checked=lambda item: _current() is None,
+            self._make_device_action(None, None),
+            checked=lambda item: (
+                self._session.current_input_device is None
+                and self._session.current_output_device is None
+            ),
         )
+        def _is_current(group: dict) -> bool:
+            if group["input"] is not None and self._session.current_input_device != group["input"]:
+                return False
+            if group["output"] is not None and self._session.current_output_device != group["output"]:
+                return False
+            return True
+
         try:
-            for name in get_audio_devices(kind):
+            for group in get_audio_device_groups():
                 yield pystray.MenuItem(
-                    name,
-                    self._make_device_action(kind, name),
-                    checked=lambda item, n=name: _current() == n,
+                    group["label"],
+                    self._make_device_action(group["input"], group["output"]),
+                    checked=lambda item, g=group: _is_current(g),
                 )
         except Exception as exc:
-            log.warning("Could not list %s devices: %s", kind, exc)
+            log.warning("Could not list audio devices: %s", exc)
 
     def _build_gain_submenu(self) -> pystray.Menu:
         """Build the mic gain preset submenu."""
@@ -158,20 +168,25 @@ class TrayApp:
             for label, value in presets
         ])
 
-    def _make_device_action(self, kind: str, device: Optional[str]):
-        """Return a pystray action that switches the microphone or speaker
-        device (kind: "input" or "output")."""
+    def _make_device_action(self, input_device: Optional[str], output_device: Optional[str]):
+        """Return a pystray action that switches both the microphone and
+        speaker to the given physical device's endpoints in one atomic,
+        rollback-on-failure step."""
         def _action(icon, item):
             def worker():
                 try:
-                    if kind == "input":
-                        self._session.switch_input_device(device)
-                    else:
-                        self._session.switch_output_device(device)
+                    self._session.switch_devices(input_device, output_device)
+                    if self._config_path is not None:
+                        try:
+                            from utils.config_io import save_device_selection
+                            save_device_selection(
+                                self._config_path, input_device, output_device,
+                            )
+                        except Exception as exc:
+                            log.warning("Could not save device selection to config: %s", exc)
                 except Exception as exc:
-                    label = "Microphone" if kind == "input" else "Speaker"
-                    log.error("%s switch failed: %s", label, exc)
-                    self._icon.notify(f"{label} switch failed: {exc}", "Duet Voice")
+                    log.error("Audio device switch failed: %s", exc)
+                    self._icon.notify(f"Audio device switch failed: {exc}", "Duet Voice")
                 self._refresh()
             threading.Thread(target=worker, daemon=True).start()
         return _action
