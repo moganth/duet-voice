@@ -10,6 +10,11 @@ PyYAML>=6.0              # config file parsing
 pystray>=0.19.5
 Pillow>=10.0             # tray icon image generation
 
+# Live audio device enumeration (hot-plug detection) via Windows Core Audio.
+# PortAudio's own device list is a one-time snapshot from process start, so
+# this is queried directly instead - see services/audio_service.py.
+pycaw>=20240210; sys_platform == "win32"
+
 # Optional: global mute / push-to-talk hotkeys.
 # On Windows this does NOT require admin for most keys, but some
 # combos may. If you skip installing this, hotkeys are just disabled

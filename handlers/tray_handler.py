@@ -54,7 +54,8 @@ class TrayApp:
                               visible=lambda item: self._session.is_connected),
             pystray.MenuItem("Mute", self._on_toggle_mute, checked=lambda item: self._session.is_muted),
             pystray.Menu.SEPARATOR,
-            pystray.MenuItem("Audio Device", pystray.Menu(self._device_menu_items)),
+            pystray.MenuItem("Microphone", pystray.Menu(lambda: self._device_menu_items("input"))),
+            pystray.MenuItem("Speaker", pystray.Menu(lambda: self._device_menu_items("output"))),
             pystray.MenuItem("Mic Boost", self._build_gain_submenu()),
             pystray.Menu.SEPARATOR,
             pystray.MenuItem("Quit", self._on_quit_clicked),
@@ -113,27 +114,36 @@ class TrayApp:
 
     # ---- audio device & gain controls --------------------------------------
 
-    def _device_menu_items(self):
-        """Generator called fresh every time the Audio Device submenu opens.
-        pystray destroys and rebuilds the popup on each right-click, so this
-        is invoked on every hover - hot-plugged devices appear immediately
-        without needing an app restart or a manual refresh."""
+    def _device_menu_items(self, kind: str):
+        """Generator called fresh every time the Microphone/Speaker submenu
+        opens. get_audio_devices() queries Windows directly (see
+        services/audio_service.py) so hot-plugged devices appear
+        immediately without an app restart or manual refresh - even mid-call.
+
+        Each submenu is filtered to devices that actually support that
+        direction, so e.g. a Bluetooth headset's output-only "Headphones"
+        (A2DP) endpoint only ever shows up under Speaker, while its
+        "Headset" (HFP, has a mic) endpoint can show under both - instead of
+        one flat, confusing list with no way to tell which is which."""
         from services.audio_service import get_audio_devices
+
+        def _current() -> Optional[str]:
+            return self._session.current_input_device if kind == "input" else self._session.current_output_device
 
         yield pystray.MenuItem(
             "(system default)",
-            self._make_device_action(None),
-            checked=lambda item: self._session.current_audio_device is None,
+            self._make_device_action(kind, None),
+            checked=lambda item: _current() is None,
         )
         try:
-            for name in get_audio_devices():
+            for name in get_audio_devices(kind):
                 yield pystray.MenuItem(
                     name,
-                    self._make_device_action(name),
-                    checked=lambda item, n=name: self._session.current_audio_device == n,
+                    self._make_device_action(kind, name),
+                    checked=lambda item, n=name: _current() == n,
                 )
         except Exception as exc:
-            log.warning("Could not list audio devices: %s", exc)
+            log.warning("Could not list %s devices: %s", kind, exc)
 
     def _build_gain_submenu(self) -> pystray.Menu:
         """Build the mic gain preset submenu."""
@@ -148,15 +158,20 @@ class TrayApp:
             for label, value in presets
         ])
 
-    def _make_device_action(self, device: Optional[str]):
-        """Return a pystray action that switches the audio device."""
+    def _make_device_action(self, kind: str, device: Optional[str]):
+        """Return a pystray action that switches the microphone or speaker
+        device (kind: "input" or "output")."""
         def _action(icon, item):
             def worker():
                 try:
-                    self._session.switch_audio_device(device)
+                    if kind == "input":
+                        self._session.switch_input_device(device)
+                    else:
+                        self._session.switch_output_device(device)
                 except Exception as exc:
-                    log.error("Device switch failed: %s", exc)
-                    self._icon.notify(f"Device switch failed: {exc}", "Duet Voice")
+                    label = "Microphone" if kind == "input" else "Speaker"
+                    log.error("%s switch failed: %s", label, exc)
+                    self._icon.notify(f"{label} switch failed: {exc}", "Duet Voice")
                 self._refresh()
             threading.Thread(target=worker, daemon=True).start()
         return _action
@@ -169,32 +184,32 @@ class TrayApp:
         return _action
 
     def _start_device_monitor(self) -> None:
-        """Poll the audio device list every 2 s and call _refresh() on change.
+        """Poll the live microphone/speaker device lists every 2 s and rebuild
+        the tray menu on change.
 
-        Root cause of hot-plug not working: PortAudio (WASAPI backend) caches
-        its device list at Pa_Initialize() time.  sd.query_devices() always
-        returns the same startup snapshot, so comparing it each poll gives
-        current == last forever regardless of plug/unplug events.
+        pystray's Win32 backend caches its native menu handle and won't
+        notice new/removed items on its own, so this forces a rebuild via
+        _refresh() when the device list actually changes.
 
-        Fix: reinit_portaudio_if_safe() calls sd._terminate() + sd._initialize()
-        before each query to force PortAudio to re-enumerate WASAPI endpoints
-        from Windows. Guard: NEVER terminate while streams are open - that
-        crashes the active MicCapture / SpeakerPlayback streams. The check is
-        done twice - once here, once again under the lock inside
-        reinit_portaudio_if_safe() - to close the race where a connect/switch
-        starts opening streams in the tiny window between the two checks."""
-        from services.audio_service import get_audio_devices, reinit_portaudio_if_safe
+        get_audio_devices() queries Windows directly (see
+        services/audio_service.py), not PortAudio, so - unlike the earlier
+        sd._terminate()/_initialize() approach - this never touches the
+        active MicCapture/SpeakerPlayback streams and is safe to run
+        continuously, including during an active call."""
+        from services.audio_service import get_audio_devices
+
+        def _snapshot() -> tuple[tuple[str, ...], tuple[str, ...]]:
+            return (tuple(get_audio_devices("input")), tuple(get_audio_devices("output")))
 
         def _monitor() -> None:
             try:
-                last: tuple[str, ...] = tuple(get_audio_devices())
+                last = _snapshot()
             except Exception:
-                last = ()
+                last = ((), ())
             while True:
                 time.sleep(2.0)
                 try:
-                    reinit_portaudio_if_safe(lambda: self._session.is_safe_to_reinit_portaudio)
-                    current = tuple(get_audio_devices())
+                    current = _snapshot()
                     if current != last:
                         last = current
                         self._refresh()

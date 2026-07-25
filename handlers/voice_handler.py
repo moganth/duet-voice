@@ -203,8 +203,7 @@ class VoiceSession:
         except Exception:
             # Don't leave a half-open stream behind on failure (e.g. an
             # ambiguous/unplugged device) - without this, self._mic could
-            # stay non-None forever, permanently blocking
-            # is_safe_to_reinit_portaudio and any future start_audio() retry.
+            # stay non-None forever, blocking any future start_audio() retry.
             if self._mic:
                 try:
                     self._mic.stop()
@@ -258,10 +257,10 @@ class VoiceSession:
             self._sender_thread.join(timeout=2.0)
         if self._mic:
             self._mic.stop()
-            self._mic = None   # cleared here so is_safe_to_reinit_portaudio
+            self._mic = None
         if self._speaker:
             self._speaker.stop()
-            self._speaker = None  # stays True until streams are fully closed
+            self._speaker = None
         log.info("Audio pipeline stopped.")
 
     # ---- controls -----------------------------------------------------------
@@ -304,27 +303,32 @@ class VoiceSession:
         return self._audio_running
 
     @property
-    def is_safe_to_reinit_portaudio(self) -> bool:
-        """Stricter guard than is_audio_running.  stop_audio() sets
-        _audio_running=False first (so the sender loop can exit), then
-        closes the PortAudio streams, then clears _mic/_speaker to None.
-        This property is only True after ALL streams are fully closed,
-        preventing the device monitor from calling sd._terminate() while
-        MicCapture / SpeakerPlayback are still being torn down."""
-        return not self._audio_running and self._mic is None and self._speaker is None
-
-    @property
-    def current_audio_device(self) -> Optional[str]:
-        """Currently configured audio device name (None = system default)."""
+    def current_input_device(self) -> Optional[str]:
+        """Currently configured microphone device name (None = system default)."""
         return self.config.audio.input_device
 
-    def switch_audio_device(self, device: Optional[str]) -> None:
-        """Hot-swap both input and output streams to device without
-        disconnecting the network link.  Pass None for the system default.
+    @property
+    def current_output_device(self) -> Optional[str]:
+        """Currently configured speaker device name (None = system default)."""
+        return self.config.audio.output_device
 
-        If the new device fails to open (e.g. it was just unplugged, or a
-        name collides across host APIs), rolls back to the previous device
-        so the call keeps working instead of being left silently dead."""
+    def switch_input_device(self, device: Optional[str]) -> None:
+        """Hot-swap only the microphone, keeping the current speaker device."""
+        self._switch_devices(device, self.config.audio.output_device)
+
+    def switch_output_device(self, device: Optional[str]) -> None:
+        """Hot-swap only the speaker, keeping the current microphone device."""
+        self._switch_devices(self.config.audio.input_device, device)
+
+    def _switch_devices(self, input_device: Optional[str], output_device: Optional[str]) -> None:
+        """Hot-swap the input and/or output stream to new devices without
+        disconnecting the network link. Pass None for the system default.
+
+        If the new selection fails to open (e.g. it was just unplugged, or
+        a device that doesn't support the requested direction - such as a
+        Bluetooth "Headphones" A2DP endpoint picked as a microphone), rolls
+        back to the previous devices so the call keeps working instead of
+        being left silently dead."""
         was_running = self._audio_running
         previous_input = self.config.audio.input_device
         previous_output = self.config.audio.output_device
@@ -334,28 +338,37 @@ class VoiceSession:
             if self._player:
                 self._player.reset()
 
-        self.config.audio.input_device = device
-        self.config.audio.output_device = device
+        self.config.audio.input_device = input_device
+        self.config.audio.output_device = output_device
 
         if not was_running:
-            log.info("Audio device set to: %s (will apply on next connect)", device or "(system default)")
+            log.info(
+                "Audio devices set to: mic=%s speaker=%s (will apply on next connect)",
+                input_device or "(system default)", output_device or "(system default)",
+            )
             return
 
         try:
             self.start_audio()
-            log.info("Audio device switched to: %s", device or "(system default)")
+            log.info(
+                "Audio devices switched to: mic=%s speaker=%s",
+                input_device or "(system default)", output_device or "(system default)",
+            )
         except Exception as exc:
             log.error(
-                "Failed to switch to device %s: %s - reverting to previous device",
-                device or "(system default)", exc,
+                "Failed to switch devices (mic=%s speaker=%s): %s - reverting to previous devices",
+                input_device or "(system default)", output_device or "(system default)", exc,
             )
             self.config.audio.input_device = previous_input
             self.config.audio.output_device = previous_output
             try:
                 self.start_audio()
-                log.info("Reverted to previous audio device: %s", previous_input or "(system default)")
+                log.info(
+                    "Reverted to previous audio devices: mic=%s speaker=%s",
+                    previous_input or "(system default)", previous_output or "(system default)",
+                )
             except Exception as exc2:
-                log.error("Rollback to previous device also failed: %s - audio pipeline is stopped", exc2)
+                log.error("Rollback to previous devices also failed: %s - audio pipeline is stopped", exc2)
             raise
 
     def set_mic_gain(self, gain: float) -> None:
