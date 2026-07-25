@@ -71,6 +71,16 @@ class VoiceSocket:
         _, ip, port = data.decode("ascii").split()
         return ip, int(port)
 
+    @staticmethod
+    def detect_local_ip(stun_addr: tuple[str, int]) -> str:
+        """Return the local interface IP used to reach the relay."""
+        probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            probe.connect(stun_addr)
+            return probe.getsockname()[0]
+        finally:
+            probe.close()
+
     def punch(self, peer_addr: tuple[str, int], attempts: int = 6, interval_s: float = 0.15) -> None:
         """Fire a burst of keepalives at the peer's public endpoint to open
         our NAT's outbound mapping for their return traffic."""

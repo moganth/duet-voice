@@ -33,7 +33,7 @@ class VoiceSession:
         self.frame_size = config.frame_size_samples
 
         self._voice_socket: Optional[VoiceSocket] = None
-        self._peer_addr: Optional[tuple[str, int]] = None
+        self._peer_addrs: list[tuple[str, int]] = []
 
         self._encoder: Optional[OpusEncoder] = None
         self._decoder: Optional[OpusDecoder] = None
@@ -68,22 +68,35 @@ class VoiceSession:
         if net.mode == "direct":
             if not net.peer_ip or not net.peer_port:
                 raise ValueError("network.peer_ip / peer_port must be set for 'direct' mode.")
-            self._peer_addr = (net.peer_ip, net.peer_port)
-            log.info("Direct mode: peer at %s:%s", *self._peer_addr)
+            self._peer_addrs = [(net.peer_ip, net.peer_port)]
+            log.info("Direct mode: peer at %s:%s", *self._peer_addrs[0])
         else:
             self._validate_signaling_url(net.signaling_url)
             stun_host = self._stun_host_from_signaling_url(net.signaling_url)
             log.info("Discovering public endpoint via %s ...", stun_host)
             my_ip, my_port = self._voice_socket.discover_public_endpoint((stun_host, 40000))
+            my_local_ip = self._voice_socket.detect_local_ip((stun_host, 40000))
             log.info("Our public endpoint: %s:%s", my_ip, my_port)
 
             peer = exchange_endpoints_sync(
                 net.signaling_url, net.room_code,
-                PublicEndpoint(my_ip, my_port), self.config.display_name,
+                PublicEndpoint(
+                    my_ip,
+                    my_port,
+                    my_local_ip,
+                    self._voice_socket.local_port,
+                ),
+                self.config.display_name,
             )
-            self._peer_addr = (peer.ip, peer.port)
-            log.info("Peer public endpoint: %s:%s - punching...", *self._peer_addr)
-            self._voice_socket.punch(self._peer_addr)
+            self._peer_addrs = [(peer.ip, peer.port)]
+            if peer.local_ip and peer.local_port:
+                self._peer_addrs.append((peer.local_ip, peer.local_port))
+            self._peer_addrs = list(dict.fromkeys(self._peer_addrs))
+            log.info("Peer public endpoint: %s:%s - punching...", peer.ip, peer.port)
+            if peer.local_ip and peer.local_port:
+                log.info("Peer local endpoint: %s:%s", peer.local_ip, peer.local_port)
+            for peer_addr in self._peer_addrs:
+                self._voice_socket.punch(peer_addr)
 
         self._encoder = OpusEncoder(
             self.config.audio.sample_rate, self.config.audio.channels,
@@ -132,8 +145,9 @@ class VoiceSession:
         seq = 0
         interval = self.config.network.keepalive_interval_s
         while not self._stop_flag.is_set():
-            if self._voice_socket and self._peer_addr:
-                self._voice_socket.send_keepalive(seq, self._peer_addr)
+            if self._voice_socket and self._peer_addrs:
+                for peer_addr in self._peer_addrs:
+                    self._voice_socket.send_keepalive(seq, peer_addr)
                 seq += 1
             self._stop_flag.wait(interval)
 
@@ -179,8 +193,9 @@ class VoiceSession:
                 log.warning("Encode failed: %s", exc)
                 continue
 
-            if self._voice_socket and self._peer_addr:
-                self._voice_socket.send_audio(self._send_seq, payload, self._peer_addr)
+            if self._voice_socket and self._peer_addrs:
+                for peer_addr in self._peer_addrs:
+                    self._voice_socket.send_audio(self._send_seq, payload, peer_addr)
                 self._send_seq += 1
                 self._tx_packets += 1
                 if self._tx_packets % 50 == 0:

@@ -22,6 +22,12 @@ so there's also a manual `mode: direct` fallback.
    traffic to X" and lets return traffic from X back in. Voice now
    flows directly between the two PCs; the relay is no longer involved.
 
+The current client/server pair also relays each peer's local LAN
+address when available. That gives the app a better chance of working
+when both laptops are on the same Wi-Fi or behind the same router,
+where pure public-IP hole punching can fail because of NAT loopback /
+hairpin restrictions.
+
 This works behind **full-cone** and **restricted-cone NAT**, which
 covers most home routers (including most ISP-provided ones and most
 Wi-Fi routers in default configuration).
@@ -38,6 +44,12 @@ hole punching relies on. This shows up on:
 If you wait a minute after clicking Connect and the tray still says
 "Not connected," this is the most likely cause. Use `mode: direct`
 instead (below).
+
+If both laptops are on the same public IP and still never receive any
+audio, make sure you are running the updated signaling server code in
+this repo. The local-LAN fallback depends on the server relaying the
+extra `local_ip` / `local_port` fields; an older container image that
+only relays public endpoints will not provide that fallback.
 
 ## Mode: `direct` (manual, always works if you can port-forward)
 

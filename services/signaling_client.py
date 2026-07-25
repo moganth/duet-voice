@@ -35,6 +35,8 @@ log = get_logger(__name__)
 class PublicEndpoint:
     ip: str
     port: int
+    local_ip: str | None = None
+    local_port: int | None = None
 
 
 async def _exchange(signaling_url: str, room_code: str, my_endpoint: PublicEndpoint,
@@ -46,12 +48,19 @@ async def _exchange(signaling_url: str, room_code: str, my_endpoint: PublicEndpo
             "ip": my_endpoint.ip,
             "port": my_endpoint.port,
             "name": display_name,
+            "local_ip": my_endpoint.local_ip,
+            "local_port": my_endpoint.local_port,
         }))
         log.info("Waiting for peer to join room '%s'...", room_code)
         async for raw in _with_timeout(ws, timeout):
             msg = json.loads(raw)
             if msg.get("type") == "peer_endpoint":
-                return PublicEndpoint(msg["ip"], msg["port"])
+                return PublicEndpoint(
+                    msg["ip"],
+                    msg["port"],
+                    msg.get("local_ip"),
+                    msg.get("local_port"),
+                )
             if msg.get("type") == "room_full_error":
                 raise RuntimeError("That room code already has two peers connected.")
         raise ConnectionError("Signaling connection closed before peer joined.")
