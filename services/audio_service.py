@@ -120,6 +120,65 @@ def _resolve_device_index(name: Optional[str], kind: str) -> Optional[int]:
     return matches[0]
 
 
+class _MicAGC:
+    """Adaptive gain control for the microphone.
+
+    A fixed multiplier (the old behaviour) can't win: turn it up enough to
+    hear quiet speech from a normal mic distance and it amplifies room
+    noise by the exact same amount, so "gain" mostly just makes the hiss
+    louder, not the voice. Wired earbud mics in particular are only loud
+    enough at point-blank range, so a static multiplier tuned for that
+    distance is either too quiet everywhere else or clips/distorts.
+
+    This instead tracks a slow-moving noise-floor estimate and only drives
+    the gain up when the instantaneous level clearly exceeds it (i.e. looks
+    like speech, not ambient noise). Gain relaxes back down to the user's
+    manual baseline during silence, so quiet room noise is never boosted
+    past that baseline - only actual speech gets the extra automatic boost
+    needed to reach a consistent, audible target level regardless of mic
+    distance. A soft (tanh) limiter is applied after the gain so an
+    unexpectedly loud transient saturates gently instead of clipping.
+    """
+
+    _TARGET_PEAK = 11000.0      # ~-9.5 dBFS target for speech peaks
+    _MAX_TARGET_PEAK = 26000.0  # cap so a high manual gain can't push into hard clipping territory
+    _NOISE_FLOOR_INIT = 150.0
+    _MAX_AUTO_GAIN = 14.0
+    _GAIN_ATTACK = 0.20         # fast: catch quiet speech quickly
+    _GAIN_RELEASE = 0.03        # slow: don't let gain snap back and "pump" between words
+    _NOISE_ATTACK = 0.02        # slow adaptation of the ambient noise-floor estimate
+    _SPEECH_MARGIN = 3.0        # signal must exceed the noise floor by this factor to count as speech
+
+    def __init__(self) -> None:
+        self._noise_floor = self._NOISE_FLOOR_INIT
+        self._gain = 1.0
+
+    def process(self, samples: np.ndarray, manual_gain: float) -> np.ndarray:
+        # int16 abs() overflows at -32768, so widen before taking the peak.
+        peak = float(np.abs(samples.astype(np.int32)).max()) if samples.size else 0.0
+
+        if peak < self._noise_floor * self._SPEECH_MARGIN:
+            self._noise_floor += (peak - self._noise_floor) * self._NOISE_ATTACK
+            self._noise_floor = max(self._noise_floor, 20.0)
+
+        is_speech_like = peak > self._noise_floor * self._SPEECH_MARGIN
+        target_peak = min(self._MAX_TARGET_PEAK, self._TARGET_PEAK * manual_gain)
+
+        if is_speech_like and peak > 1.0:
+            desired = min(self._MAX_AUTO_GAIN, max(1.0, target_peak / peak))
+            rate = self._GAIN_ATTACK if desired > self._gain else self._GAIN_RELEASE
+            self._gain += (desired - self._gain) * rate
+        else:
+            # Silence / ambient noise: relax back to the user's manual
+            # baseline instead of holding a large boost that would blast
+            # the next burst of room noise at full volume.
+            self._gain += (manual_gain - self._gain) * self._GAIN_RELEASE
+
+        boosted = samples.astype(np.float32) * self._gain
+        limited = np.tanh(boosted / 32767.0) * 32767.0
+        return limited.astype(np.int16)
+
+
 class MicCapture:
     """Pulls fixed-size int16 mono frames from the microphone."""
 
@@ -127,6 +186,7 @@ class MicCapture:
                  gain: float = 1.0):
         self._frame_size = frame_size
         self._gain = gain
+        self._agc = _MicAGC()
         self._queue: "queue.Queue[bytes]" = queue.Queue(maxsize=50)
         with _portaudio_lock:
             resolved = _resolve_device_index(device, "input")
@@ -142,9 +202,7 @@ class MicCapture:
     def _callback(self, indata, frames, time_info, status):
         if status:
             log.debug("Mic input status: %s", status)
-        data = indata[:, 0]
-        if self._gain != 1.0:
-            data = np.clip(data.astype(np.int32) * self._gain, -32768, 32767).astype(np.int16)
+        data = self._agc.process(indata[:, 0], self._gain)
         try:
             self._queue.put_nowait(data.tobytes())
         except queue.Full:
