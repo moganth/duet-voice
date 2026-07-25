@@ -1,0 +1,20 @@
+# Core
+sounddevice>=0.4.6      # mic/speaker I/O (bundles PortAudio on Windows wheels)
+numpy>=1.26             # audio sample manipulation
+webrtcvad>=2.0.10       # voice activity detection
+websockets>=12.0        # signaling client (talks to signaling-server)
+pydantic>=2.6           # config validation
+PyYAML>=6.0              # config file parsing
+
+# Tray / background operation
+pystray>=0.19.5
+Pillow>=10.0             # tray icon image generation
+
+# Optional: global mute / push-to-talk hotkeys.
+# On Windows this does NOT require admin for most keys, but some
+# combos may. If you skip installing this, hotkeys are just disabled
+# and the tray menu still works fine.
+keyboard>=0.13.5
+
+# --- Not required at runtime, only for packaging (see docs/PACKAGING.md) ---
+# pyinstaller>=6.0

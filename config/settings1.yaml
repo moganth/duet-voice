@@ -1,0 +1,39 @@
+# Copy this file to settings.yaml and edit it. settings.yaml is gitignored
+# on purpose since it will contain your peer's info / room code.
+
+display_name: "Player1"
+
+audio:
+  sample_rate: 48000
+  channels: 1
+  frame_ms: 20
+  input_device: null       # null = default mic. Run `python main.py --list-devices` to see names.
+  output_device: null
+  mic_gain: 1.0
+
+codec:
+  bitrate_bps: 24000        # 16000 = lowest usable, 32000 = near-CD voice quality
+  vbr: true
+  fec: true
+  expected_packet_loss_pct: 15
+
+vad:
+  enabled: true             # only transmit when you're actually talking
+  aggressiveness: 2         # 0 (lenient) - 3 (aggressive filtering of non-speech)
+  hangover_ms: 300
+
+network:
+  mode: signaling           # "signaling" (auto NAT punch via relay) or "direct" (manual IP)
+  local_udp_port: 52223
+  peer_ip: null              # only used in "direct" mode
+  peer_port: null            # only used in "direct" mode
+  signaling_url: "ws://3.94.205.14:8000/ws"
+  room_code: "changeme-room"  # must match on both PCs, pick something unique
+  jitter_buffer_frames: 3
+  keepalive_interval_s: 5.0
+
+hotkeys:
+  push_to_talk: null         # e.g. "ctrl+alt+space" — null keeps voice-activity mode
+  mute_toggle: "ctrl+alt+m"
+
+log_level: "INFO"

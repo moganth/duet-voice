@@ -1,0 +1,31 @@
+# Personal config - contains your room code / peer IP, don't commit it
+config/settings.yaml
+
+# Bundled native codec libs (see docs/SETUP.md - download these yourself)
+libs/*
+!libs/windows/
+!libs/windows/README.txt
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+*.egg-info/
+
+# PyInstaller build output
+build/
+dist/
+*.spec.bak
+
+# Logs
+*.log
+
+# OS cruft
+.DS_Store
+Thumbs.db
+
+# Editors
+.vscode/
+.idea/
