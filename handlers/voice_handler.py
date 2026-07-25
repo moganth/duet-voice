@@ -239,8 +239,10 @@ class VoiceSession:
             self._sender_thread.join(timeout=2.0)
         if self._mic:
             self._mic.stop()
+            self._mic = None   # cleared here so is_safe_to_reinit_portaudio
         if self._speaker:
             self._speaker.stop()
+            self._speaker = None  # stays True until streams are fully closed
         log.info("Audio pipeline stopped.")
 
     # ---- controls -----------------------------------------------------------
@@ -275,6 +277,48 @@ class VoiceSession:
         if self._last_any_rx_ts == 0.0:
             return False
         return (time.monotonic() - self._last_any_rx_ts) < 15.0
+
+    @property
+    def is_audio_running(self) -> bool:
+        """True when the microphone and speaker PortAudio streams are active.
+        Used to guard PortAudio re-initialisation in the device monitor."""
+        return self._audio_running
+
+    @property
+    def is_safe_to_reinit_portaudio(self) -> bool:
+        """Stricter guard than is_audio_running.  stop_audio() sets
+        _audio_running=False first (so the sender loop can exit), then
+        closes the PortAudio streams, then clears _mic/_speaker to None.
+        This property is only True after ALL streams are fully closed,
+        preventing the device monitor from calling sd._terminate() while
+        MicCapture / SpeakerPlayback are still being torn down."""
+        return not self._audio_running and self._mic is None and self._speaker is None
+
+    @property
+    def current_audio_device(self) -> Optional[str]:
+        """Currently configured audio device name (None = system default)."""
+        return self.config.audio.input_device
+
+    def switch_audio_device(self, device: Optional[str]) -> None:
+        """Hot-swap both input and output streams to device without
+        disconnecting the network link.  Pass None for the system default."""
+        was_running = self._audio_running
+        if was_running:
+            self.stop_audio()
+            if self._player:
+                self._player.reset()
+        self.config.audio.input_device = device
+        self.config.audio.output_device = device
+        log.info("Audio device switched to: %s", device or "(system default)")
+        if was_running:
+            self.start_audio()
+
+    def set_mic_gain(self, gain: float) -> None:
+        """Update microphone gain live without restarting the audio stream."""
+        self.config.audio.mic_gain = gain
+        if self._mic:
+            self._mic.gain = gain
+        log.info("Mic gain set to %.1f×", gain)
 
     def disconnect(self) -> None:
         self._stop_flag.set()

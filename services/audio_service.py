@@ -20,6 +20,38 @@ def list_devices() -> str:
     return str(sd.query_devices())
 
 
+def get_audio_devices() -> list[str]:
+    """Return audio device names from the preferred host API, queried fresh
+    each call so hot-plugged devices appear immediately.
+
+    On Windows, restricts to WASAPI devices only.  This eliminates the
+    legacy virtual entries (Microsoft Sound Mapper, Primary Sound Driver,
+    MME/DirectSound duplicates) that PortAudio also enumerates but that
+    are not real audio hardware."""
+    import sys
+
+    # On Windows, use WASAPI - it lists real audio endpoints only and skips
+    # the legacy MME/DirectSound virtual mappers and driver duplicates.
+    # On Linux / macOS let all devices through (no virtual-mapper problem).
+    target_hostapi: int | None = None
+    if sys.platform == "win32":
+        for i, api in enumerate(sd.query_hostapis()):
+            if "WASAPI" in api["name"]:
+                target_hostapi = i
+                break
+
+    seen: set[str] = set()
+    names: list[str] = []
+    for device in sd.query_devices():
+        if target_hostapi is not None and device["hostapi"] != target_hostapi:
+            continue
+        name = device["name"]
+        if name not in seen:
+            seen.add(name)
+            names.append(name)
+    return names
+
+
 class MicCapture:
     """Pulls fixed-size int16 mono frames from the microphone."""
 
@@ -65,6 +97,15 @@ class MicCapture:
             return self._queue.get(timeout=timeout)
         except queue.Empty:
             return None
+
+    @property
+    def gain(self) -> float:
+        return self._gain
+
+    @gain.setter
+    def gain(self, value: float) -> None:
+        """Update mic amplification live - safe to call from any thread."""
+        self._gain = float(value)
 
 
 class SpeakerPlayback:
