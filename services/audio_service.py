@@ -140,10 +140,17 @@ def _resolve_device_index(name: Optional[str], kind: str) -> Optional[int]:
                 and (hostapi_filter is None or d["hostapi"] == hostapi_filter)
             ]
 
-        found = _candidates(preferred_hostapi) if preferred_hostapi is not None else []
-        if not found:
-            found = _candidates(None)
-        return found
+        if preferred_hostapi is not None:
+            # On Windows, only ever match the WASAPI entry. Legacy host
+            # APIs (WDM-KS in particular) expose the same-named device but
+            # are notoriously unreliable for opening Bluetooth endpoints
+            # (e.g. "WdmSyncIoctl" PaErrorCode -9999 failures) - silently
+            # falling back to them just trades a clear "not found" error
+            # for a confusing crash when the stream is actually opened.
+            # If WASAPI doesn't have it (yet), the caller's reinit+retry
+            # is the right remedy, not a downgrade to another host API.
+            return _candidates(preferred_hostapi)
+        return _candidates(None)
 
     matches = _find()
     if not matches:
