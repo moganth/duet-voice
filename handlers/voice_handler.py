@@ -2,7 +2,7 @@
 Ties every service together into one voice session:
 
     mic -> VAD gate -> Opus encode -> UDP send
-    UDP recv -> jitter buffer -> Opus decode (inside jitter buffer) -> speakers
+    UDP recv -> jitter buffer -> AudioPlayer (Opus decode + PLC ceiling) -> speakers
 
 Connection setup (STUN + signaling + hole punch) happens in `connect()`;
 `start_audio()` / `stop_audio()` can be toggled independently so the
@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import threading
 import time
-from typing import Optional
+from typing import Callable, Optional
 from urllib.parse import urlparse
 
 from schemas.config_schema import AppConfig
@@ -21,7 +21,7 @@ from services.codec_service import OpusEncoder, OpusDecoder
 from services.network_service import VoiceSocket
 from services.signaling_client import PublicEndpoint, exchange_endpoints_sync
 from services.vad_service import VoiceActivityDetector
-from utils.jitter_buffer import JitterBuffer
+from utils.audio_player import AudioPlayer
 from utils.logger import get_logger
 
 log = get_logger(__name__)
@@ -37,7 +37,7 @@ class VoiceSession:
 
         self._encoder: Optional[OpusEncoder] = None
         self._decoder: Optional[OpusDecoder] = None
-        self._jitter: Optional[JitterBuffer] = None
+        self._player: Optional[AudioPlayer] = None
 
         self._mic: Optional[MicCapture] = None
         self._speaker: Optional[SpeakerPlayback] = None
@@ -58,6 +58,14 @@ class VoiceSession:
         self._sender_thread: Optional[threading.Thread] = None
         self._keepalive_thread: Optional[threading.Thread] = None
         self._stop_flag = threading.Event()
+
+        # Connection health tracking.
+        self._connect_ts: float = 0.0
+        self._last_any_rx_ts: float = 0.0
+        self._link_up: bool = False
+        # Fired by the keepalive loop whenever is_audio_flowing changes state.
+        # Set by TrayApp so the icon updates without polling.
+        self.on_state_change: Optional[Callable[[], None]] = None
 
     # ---- connection setup -------------------------------------------------
 
@@ -104,9 +112,13 @@ class VoiceSession:
             self.config.codec.fec, self.config.codec.expected_packet_loss_pct,
         )
         self._decoder = OpusDecoder(self.config.audio.sample_rate, self.config.audio.channels)
-        self._jitter = JitterBuffer(self._decoder, self.frame_size, net.jitter_buffer_frames)
+        self._player = AudioPlayer(self._decoder, self.frame_size, net.jitter_buffer_frames)
 
-        self._voice_socket.start_receiver(self._on_audio_received)
+        self._connect_ts = time.monotonic()
+        self._last_any_rx_ts = 0.0
+        self._link_up = False
+        self._voice_socket.start_receiver(self._on_audio_received,
+                                          on_keepalive=self._on_keepalive_received)
         self._connected = True
 
         self._stop_flag.clear()
@@ -135,11 +147,16 @@ class VoiceSession:
             )
 
     def _on_audio_received(self, seq: int, payload: bytes) -> None:
-        if self._jitter:
-            self._jitter.put(seq, payload)
+        self._last_any_rx_ts = time.monotonic()
+        if self._player:
+            self._player.put(seq, payload)
         self._rx_packets += 1
         if self._rx_packets % 50 == 0:
             log.info("Received %d audio packets", self._rx_packets)
+
+    def _on_keepalive_received(self) -> None:
+        """Called when a UDP keepalive arrives - proves the P2P link is alive."""
+        self._last_any_rx_ts = time.monotonic()
 
     def _keepalive_loop(self) -> None:
         seq = 0
@@ -149,6 +166,21 @@ class VoiceSession:
                 for peer_addr in self._peer_addrs:
                     self._voice_socket.send_keepalive(seq, peer_addr)
                 seq += 1
+
+            # Health: fire on_state_change when link up/down status flips.
+            now_up = self.is_audio_flowing
+            if now_up != self._link_up:
+                self._link_up = now_up
+                if not now_up:
+                    secs = (time.monotonic() - self._last_any_rx_ts
+                            if self._last_any_rx_ts else float("inf"))
+                    log.warning(
+                        "No packets received for %.0f s — "
+                        "connection may be lost or NAT punch failed.", secs
+                    )
+                if self.on_state_change:
+                    self.on_state_change()
+
             self._stop_flag.wait(interval)
 
     # ---- audio pipeline -----------------------------------------------------
@@ -163,7 +195,7 @@ class VoiceSession:
         )
         self._speaker = SpeakerPlayback(
             audio_cfg.sample_rate, self.frame_size, audio_cfg.output_device,
-            pull_frame_callback=self._jitter.get_next_pcm if self._jitter else None,
+            pull_frame_callback=self._player.get_next_pcm if self._player else None,
         )
         self._mic.start()
         self._speaker.start()
@@ -229,6 +261,21 @@ class VoiceSession:
     def is_connected(self) -> bool:
         return self._connected
 
+    @property
+    def is_audio_flowing(self) -> bool:
+        """True when the P2P link is alive (audio or keepalives arriving recently).
+        Returns True during the 15 s grace period after connecting so the icon
+        does not flash a warning before the first keepalive has had time to arrive.
+        Becomes False after 15 s with zero received packets — connection likely lost."""
+        if not self._connected:
+            return False
+        elapsed = time.monotonic() - self._connect_ts
+        if elapsed < 15.0:
+            return True
+        if self._last_any_rx_ts == 0.0:
+            return False
+        return (time.monotonic() - self._last_any_rx_ts) < 15.0
+
     def disconnect(self) -> None:
         self._stop_flag.set()
         self.stop_audio()
@@ -236,5 +283,7 @@ class VoiceSession:
             self._keepalive_thread.join(timeout=2.0)
         if self._voice_socket:
             self._voice_socket.close()
+        if self._player:
+            self._player.reset()
         self._connected = False
         log.info("Disconnected.")

@@ -81,14 +81,15 @@ class VoiceSocket:
         finally:
             probe.close()
 
-    def punch(self, peer_addr: tuple[str, int], attempts: int = 6, interval_s: float = 0.15) -> None:
+    def punch(self, peer_addr: tuple[str, int], attempts: int = 15, interval_s: float = 0.1) -> None:
         """Fire a burst of keepalives at the peer's public endpoint to open
         our NAT's outbound mapping for their return traffic."""
         for i in range(attempts):
             self._sock.sendto(pack_keepalive(i), peer_addr)
             time.sleep(interval_s)
 
-    def start_receiver(self, on_audio: Callable[[int, bytes], None]) -> None:
+    def start_receiver(self, on_audio: Callable[[int, bytes], None],
+                       on_keepalive: Optional[Callable[[], None]] = None) -> None:
         self._running = True
 
         def _loop():
@@ -108,7 +109,8 @@ class VoiceSocket:
                     continue
                 if pkt_type == PKT_AUDIO:
                     on_audio(seq, payload)
-                # keepalives: arrival alone keeps the NAT mapping open.
+                elif pkt_type == PKT_KEEPALIVE and on_keepalive:
+                    on_keepalive()
 
         self._recv_thread = threading.Thread(target=_loop, name="voice-udp-recv", daemon=True)
         self._recv_thread.start()

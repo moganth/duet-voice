@@ -28,6 +28,7 @@ def _make_icon_image(color: str) -> Image.Image:
 _ICON_CONNECTED = _make_icon_image("#3BA55D")   # green
 _ICON_MUTED = _make_icon_image("#ED4245")       # red
 _ICON_IDLE = _make_icon_image("#5865F2")        # blurple
+_ICON_WARNING = _make_icon_image("#FAA61A")     # orange - connected but link may be down
 
 
 class TrayApp:
@@ -37,6 +38,8 @@ class TrayApp:
         self._icon = pystray.Icon(
             "duet-voice", _ICON_IDLE, "Duet Voice", menu=self._build_menu()
         )
+        # Keep the icon in sync when VoiceSession's link health changes.
+        session.on_state_change = self._refresh
 
     def _build_menu(self) -> pystray.Menu:
         return pystray.Menu(
@@ -54,15 +57,19 @@ class TrayApp:
     def _status_text(self, item) -> str:
         if not self._session.is_connected:
             return "Status: Not connected"
+        if not self._session.is_audio_flowing:
+            return "Status: Connected (link down?)"
         return f"Status: Connected{' (muted)' if self._session.is_muted else ''}"
 
     def _refresh(self) -> None:
-        if self._session.is_muted:
-            self._icon.icon = _ICON_MUTED
-        elif self._session.is_connected:
-            self._icon.icon = _ICON_CONNECTED
-        else:
+        if not self._session.is_connected:
             self._icon.icon = _ICON_IDLE
+        elif self._session.is_muted:
+            self._icon.icon = _ICON_MUTED
+        elif not self._session.is_audio_flowing:
+            self._icon.icon = _ICON_WARNING
+        else:
+            self._icon.icon = _ICON_CONNECTED
         self._icon.menu = self._build_menu()
 
     def _on_connect(self, icon, item) -> None:

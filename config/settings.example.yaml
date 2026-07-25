@@ -19,8 +19,8 @@ codec:
 
 vad:
   enabled: true             # only transmit when you're actually talking
-  aggressiveness: 2         # 0 (lenient) - 3 (aggressive filtering of non-speech)
-  hangover_ms: 300
+  aggressiveness: 1         # 0 (lenient) - 3 (aggressive filtering of non-speech)
+  hangover_ms: 500
 
 network:
   mode: signaling           # "signaling" (auto NAT punch via relay) or "direct" (manual IP)
@@ -29,7 +29,7 @@ network:
   peer_port: null            # only used in "direct" mode
   signaling_url: "ws://YOUR_SERVER_IP:8000/ws"
   room_code: "changeme-room"  # must match on both PCs, pick something unique
-  jitter_buffer_frames: 3
+  jitter_buffer_frames: 5
   keepalive_interval_s: 5.0
 
 hotkeys:
