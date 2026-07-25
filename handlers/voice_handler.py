@@ -66,6 +66,13 @@ class VoiceSession:
         # Fired by the keepalive loop whenever is_audio_flowing changes state.
         # Set by TrayApp so the icon updates without polling.
         self.on_state_change: Optional[Callable[[], None]] = None
+        # Fired after start_audio() has to fall back to system-default
+        # devices because the configured ones failed to open (e.g. a
+        # Bluetooth headset whose mic and speaker profiles won't open at
+        # the same time). Set by TrayApp so it can persist the fallback
+        # instead of retrying - and failing - the same broken combo on
+        # every future launch.
+        self.on_device_fallback: Optional[Callable[[], None]] = None
 
     # ---- connection setup -------------------------------------------------
 
@@ -191,11 +198,39 @@ class VoiceSession:
         audio_cfg = self.config.audio
 
         try:
+            self._open_streams(audio_cfg.input_device, audio_cfg.output_device)
+        except Exception as exc:
+            if audio_cfg.input_device is None and audio_cfg.output_device is None:
+                raise  # already the system default - nothing safer left to fall back to
+            log.error(
+                "Failed to open configured audio devices (mic=%s speaker=%s): %s - "
+                "falling back to system default devices so the call isn't left silent.",
+                audio_cfg.input_device or "(system default)",
+                audio_cfg.output_device or "(system default)", exc,
+            )
+            self._open_streams(None, None)
+            audio_cfg.input_device = None
+            audio_cfg.output_device = None
+            if self.on_device_fallback:
+                self.on_device_fallback()
+
+        self._finish_starting()
+
+    def _finish_starting(self) -> None:
+        self._audio_running = True
+        self._sender_thread = threading.Thread(target=self._sender_loop, name="mic-sender", daemon=True)
+        self._sender_thread.start()
+        log.info("Audio pipeline started.")
+
+    def _open_streams(self, input_device: Optional[str], output_device: Optional[str]) -> None:
+        """Open the mic + speaker PortAudio streams for the given devices,
+        cleaning up any half-opened stream if either one fails."""
+        try:
             self._mic = MicCapture(
-                audio_cfg.sample_rate, self.frame_size, audio_cfg.input_device, audio_cfg.mic_gain
+                self.config.audio.sample_rate, self.frame_size, input_device, self.config.audio.mic_gain
             )
             self._speaker = SpeakerPlayback(
-                audio_cfg.sample_rate, self.frame_size, audio_cfg.output_device,
+                self.config.audio.sample_rate, self.frame_size, output_device,
                 pull_frame_callback=self._player.get_next_pcm if self._player else None,
             )
             self._mic.start()
@@ -217,11 +252,6 @@ class VoiceSession:
                     pass
                 self._speaker = None
             raise
-
-        self._audio_running = True
-        self._sender_thread = threading.Thread(target=self._sender_loop, name="mic-sender", daemon=True)
-        self._sender_thread.start()
-        log.info("Audio pipeline started.")
 
     def _sender_loop(self) -> None:
         while self._audio_running:
@@ -340,7 +370,8 @@ class VoiceSession:
             return
 
         try:
-            self.start_audio()
+            self._open_streams(input_device, output_device)
+            self._finish_starting()
             log.info(
                 "Audio devices switched to: mic=%s speaker=%s",
                 input_device or "(system default)", output_device or "(system default)",
@@ -353,7 +384,8 @@ class VoiceSession:
             self.config.audio.input_device = previous_input
             self.config.audio.output_device = previous_output
             try:
-                self.start_audio()
+                self._open_streams(previous_input, previous_output)
+                self._finish_starting()
                 log.info(
                     "Reverted to previous audio devices: mic=%s speaker=%s",
                     previous_input or "(system default)", previous_output or "(system default)",

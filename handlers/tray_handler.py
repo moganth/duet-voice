@@ -44,6 +44,10 @@ class TrayApp:
         )
         # Keep the icon in sync when VoiceSession's link health changes.
         session.on_state_change = self._refresh
+        # If the configured devices fail to open and start_audio() falls
+        # back to system default, persist that so we don't keep retrying -
+        # and failing - the same broken combo on every future launch.
+        session.on_device_fallback = self._on_device_fallback
         # Detect headset plug/unplug without requiring a manual refresh.
         self._start_device_monitor()
 
@@ -168,6 +172,28 @@ class TrayApp:
             for label, value in presets
         ])
 
+    def _on_device_fallback(self) -> None:
+        log.warning("Falling back to system-default audio devices; persisting this to config.")
+        self._save_current_devices()
+        self._icon.notify(
+            "Your configured audio device(s) failed to open - switched to system default.",
+            "Duet Voice",
+        )
+        self._refresh()
+
+    def _save_current_devices(self) -> None:
+        if self._config_path is None:
+            return
+        try:
+            from utils.config_io import save_device_selection
+            save_device_selection(
+                self._config_path,
+                self._session.current_input_device,
+                self._session.current_output_device,
+            )
+        except Exception as exc:
+            log.warning("Could not save device selection to config: %s", exc)
+
     def _make_device_action(self, input_device: Optional[str], output_device: Optional[str]):
         """Return a pystray action that switches both the microphone and
         speaker to the given physical device's endpoints in one atomic,
@@ -176,14 +202,7 @@ class TrayApp:
             def worker():
                 try:
                     self._session.switch_devices(input_device, output_device)
-                    if self._config_path is not None:
-                        try:
-                            from utils.config_io import save_device_selection
-                            save_device_selection(
-                                self._config_path, input_device, output_device,
-                            )
-                        except Exception as exc:
-                            log.warning("Could not save device selection to config: %s", exc)
+                    self._save_current_devices()
                 except Exception as exc:
                     log.error("Audio device switch failed: %s", exc)
                     self._icon.notify(f"Audio device switch failed: {exc}", "Duet Voice")

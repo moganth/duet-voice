@@ -90,9 +90,17 @@ def main() -> None:
             try:
                 session.connect()
                 session.start_audio()
-                tray._refresh()  # noqa: SLF001 - internal refresh, same package
             except Exception as exc:
                 log.error("Auto-connect failed: %s", exc)
+                # start_audio() already falls back to system-default devices
+                # on its own if the configured ones fail to open, so this
+                # only fires on a total failure (e.g. no working audio
+                # hardware at all, or the signaling/hole-punch step itself
+                # failing). Without this, the session could be left
+                # "connected" with no audio pipeline running - which looks
+                # like total communication failure with no clear cause.
+                session.disconnect()
+            tray._refresh()  # noqa: SLF001 - internal refresh, same package
 
         threading.Thread(target=autoconnect, daemon=True).start()
 
