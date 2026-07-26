@@ -304,6 +304,56 @@ def _open_stream_with_retry(open_fn, retries: int = 6, delay: float = 0.5):
     raise last_exc
 
 
+def _directsound_hostapi_index() -> Optional[int]:
+    if sys.platform != "win32":
+        return None
+    for i, api in enumerate(sd.query_hostapis()):
+        if "DirectSound" in api["name"]:
+            return i
+    return None
+
+
+def _open_device_stream(resolved_index: Optional[int], kind: str, make_stream):
+    """Open a stream for `resolved_index` (the WASAPI-preferred index from
+    _resolve_device_index; None = PortAudio's own default).
+
+    Some Bluetooth/composite-audio drivers intermittently fail a
+    WASAPI-internal kernel-streaming property query the moment PortAudio
+    opens the stream - the same 'WdmSyncIoctl'/PaErrorCode -9999 error
+    normally associated with the legacy WDM-KS host API, but surfacing
+    through WASAPI for these specific drivers. This isn't only a
+    stop/reopen teardown race (_open_stream_with_retry's retries handle
+    that): it can happen on the very first stream a fresh process ever
+    opens, with nothing to race against. Retrying the identical WASAPI
+    open rarely helps in that case - so if it still fails after those
+    retries, this falls back once to the exact same physical device's
+    DirectSound entry (an older, simpler Windows audio API that doesn't
+    go through that WASAPI code path) rather than giving up or falling
+    back to PortAudio's own ambiguous default device.
+    """
+    try:
+        return _open_stream_with_retry(lambda: make_stream(resolved_index))
+    except sd.PortAudioError:
+        if resolved_index is None:
+            raise
+        name = sd.query_devices()[resolved_index]["name"]
+        ds_hostapi = _directsound_hostapi_index()
+        if ds_hostapi is None:
+            raise
+        channel_key = "max_input_channels" if kind == "input" else "max_output_channels"
+        ds_matches = [
+            i for i, d in enumerate(sd.query_devices())
+            if d["name"] == name and d["hostapi"] == ds_hostapi and d[channel_key] > 0
+        ]
+        if not ds_matches:
+            raise
+        log.warning(
+            "WASAPI open failed for '%s'; retrying once via DirectSound (index %d) instead.",
+            name, ds_matches[0],
+        )
+        return _open_stream_with_retry(lambda: make_stream(ds_matches[0]))
+
+
 class _MicAGC:
     """Adaptive gain control for the microphone.
 
@@ -392,12 +442,12 @@ class MicCapture:
         self._queue: "queue.Queue[bytes]" = queue.Queue(maxsize=50)
         with _portaudio_lock:
             resolved = _resolve_device_index(device, "input")
-            self._stream = _open_stream_with_retry(lambda: sd.InputStream(
+            self._stream = _open_device_stream(resolved, "input", lambda idx: sd.InputStream(
                 samplerate=sample_rate,
                 channels=1,
                 dtype="int16",
                 blocksize=frame_size,
-                device=resolved,
+                device=idx,
                 callback=self._callback,
             ))
 
@@ -453,12 +503,12 @@ class SpeakerPlayback:
         self._silence = b"\x00\x00" * frame_size
         with _portaudio_lock:
             resolved = _resolve_device_index(device, "output")
-            self._stream = _open_stream_with_retry(lambda: sd.OutputStream(
+            self._stream = _open_device_stream(resolved, "output", lambda idx: sd.OutputStream(
                 samplerate=sample_rate,
                 channels=1,
                 dtype="int16",
                 blocksize=frame_size,
-                device=resolved,
+                device=idx,
                 callback=self._callback,
             ))
 

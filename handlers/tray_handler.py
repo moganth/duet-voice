@@ -140,17 +140,23 @@ class TrayApp:
         # while it silently resolved to a specific device - which didn't
         # match what Windows' own Sound Settings showed as the active
         # device, and looked like nothing was actually selected. Show the
-        # real, currently-active device name(s) instead so what the tray
-        # displays always matches what Windows shows.
+        # real, currently-active device name when it's unambiguous (mic
+        # and speaker are the same physical device). When Windows' mic and
+        # speaker defaults are two different physical devices (a perfectly
+        # normal Windows configuration - e.g. a Bluetooth headset as the
+        # communication speaker with a laptop's own mic), just say "System
+        # Default": spelling out both names side by side reads like a bug
+        # report ("why is Bluetooth AND the laptop mic selected?") rather
+        # than the accurate-but-unremarkable fact that it is.
         default_label = "System Default"
         try:
             default_in, default_out = get_current_default_names()
             if default_in and default_out and _device_group_key(default_in) == _device_group_key(default_out):
                 default_label = f"System Default ({_device_group_key(default_in)})"
-            elif default_in and default_out:
-                default_label = f"System Default ({default_in} / {default_out})"
-            elif default_in or default_out:
-                default_label = f"System Default ({default_in or default_out})"
+            elif default_in and not default_out:
+                default_label = f"System Default ({default_in})"
+            elif default_out and not default_in:
+                default_label = f"System Default ({default_out})"
         except Exception as exc:
             log.debug("Could not resolve live default device names: %s", exc)
 
