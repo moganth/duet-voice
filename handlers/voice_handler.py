@@ -358,6 +358,14 @@ class VoiceSession:
             self.stop_audio()
             if self._player:
                 self._player.reset()
+            # Give Windows a moment to actually release the just-closed
+            # device(s) before grabbing them (or a related Bluetooth
+            # profile endpoint) again. Reopening immediately after close()
+            # can hit the driver mid-teardown - surfacing as a spurious
+            # "WdmSyncIoctl"/PaErrorCode -9999 failure even though the
+            # exact same device just worked a moment ago (the underlying
+            # kernel streaming pin isn't released instantly on close()).
+            time.sleep(0.4)
 
         self.config.audio.input_device = input_device
         self.config.audio.output_device = output_device
@@ -383,6 +391,9 @@ class VoiceSession:
             )
             self.config.audio.input_device = previous_input
             self.config.audio.output_device = previous_output
+            # Same settling reason as above - the failed attempt just above
+            # may itself have left the driver mid-teardown.
+            time.sleep(0.4)
             try:
                 self._open_streams(previous_input, previous_output)
                 self._finish_starting()
