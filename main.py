@@ -20,7 +20,15 @@ from handlers.voice_handler import VoiceSession
 from schemas.config_schema import AppConfig
 from utils.logger import setup_logging, get_logger
 
-CONFIG_DIR = Path(__file__).resolve().parent / "config"
+if getattr(sys, "frozen", False):
+    # PyInstaller onefile: __file__ would resolve inside the per-launch
+    # temp extraction dir (sys._MEIPASS), which is wiped on exit - so a
+    # settings.yaml written there would never persist across runs. Use
+    # the actual .exe's directory instead (where installer.nsi installs
+    # config/settings.example.yaml alongside DuetVoice.exe).
+    CONFIG_DIR = Path(sys.executable).resolve().parent / "config"
+else:
+    CONFIG_DIR = Path(__file__).resolve().parent / "config"
 CONFIG_PATH = CONFIG_DIR / "settings.yaml"
 EXAMPLE_PATH = CONFIG_DIR / "settings.example.yaml"
 

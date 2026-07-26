@@ -18,6 +18,15 @@ venv/
 build/
 dist/
 *.spec.bak
+*.spec
+# ...except our checked-in, hand-maintained spec (source, not an
+# auto-generated artifact) - see docs/PACKAGING.md.
+!installer/DuetVoice.spec
+
+# installer\ build outputs - produced by installer.bat / makensis, not source.
+installer/DuetVoice.exe
+installer/DuetVoiceSetup.exe
+
 
 # Logs
 *.log
