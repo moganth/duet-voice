@@ -140,6 +140,35 @@ def _live_endpoint_names(kind: str) -> Optional[list[str]]:
         return None
 
 
+def _live_default_name(kind: str) -> Optional[str]:
+    """Return the friendly name of Windows' actual current default device
+    for `kind`, via pycaw/Core Audio - the exact same source Windows' own
+    Sound Settings uses. Returns None on non-Windows, if pycaw is
+    unavailable, or if the query fails (e.g. no default device set)."""
+    if sys.platform != "win32":
+        return None
+    try:
+        from pycaw.pycaw import AudioUtilities
+
+        if kind == "input":
+            device = AudioUtilities.CreateDevice(AudioUtilities.GetMicrophone())
+        else:
+            device = AudioUtilities.GetSpeakers()
+        return device.FriendlyName if device else None
+    except Exception as exc:
+        log.debug("Live default %s device lookup unavailable: %s", kind, exc)
+        return None
+
+
+def get_current_default_names() -> tuple[Optional[str], Optional[str]]:
+    """Return (input_name, output_name): the friendly names of Windows'
+    actual current default input/output devices, for display purposes -
+    e.g. so the tray's "system default" menu entry can show which real,
+    currently-active device that means, instead of a generic label that
+    doesn't match what Windows' own Sound Settings shows as active."""
+    return _live_default_name("input"), _live_default_name("output")
+
+
 def _portaudio_device_names(kind: str) -> list[str]:
     """Fallback device list sourced from PortAudio's own (possibly stale)
     cache, filtered to WASAPI on Windows. Only used if the live Windows
@@ -177,7 +206,25 @@ def _resolve_device_index(name: Optional[str], kind: str) -> Optional[int]:
     actually supports the requested direction.
     """
     if name is None:
-        return None
+        # "System default" - resolve to Windows' actual current default
+        # device (via pycaw, the same live source get_audio_devices() uses)
+        # and run it through the exact same WASAPI-preferred lookup below,
+        # instead of passing device=None straight to PortAudio. PortAudio's
+        # own bare default resolves via the MME host API's "Sound Mapper"
+        # pseudo-device on Windows, which is a legacy compatibility shim
+        # and a known source of spurious "Undefined external error"
+        # (PaErrorCode -9999) failures - and it doesn't necessarily match
+        # the device Windows' own Sound Settings shows as active, which is
+        # confusing when surfaced in the tray. This lookup is best-effort:
+        # any failure just falls back to the old device=None behaviour so
+        # "system default" never becomes a hard error.
+        live_name = _live_default_name(kind)
+        if live_name is None:
+            return None
+        try:
+            return _resolve_device_index(live_name, kind)
+        except ValueError:
+            return None
 
     channel_key = "max_input_channels" if kind == "input" else "max_output_channels"
 
@@ -228,7 +275,7 @@ def _resolve_device_index(name: Optional[str], kind: str) -> Optional[int]:
     return matches[0]
 
 
-def _open_stream_with_retry(open_fn, retries: int = 2, delay: float = 0.35):
+def _open_stream_with_retry(open_fn, retries: int = 6, delay: float = 0.5):
     """Call open_fn() (which constructs an sd.InputStream/OutputStream),
     retrying after a short pause if PortAudio raises.
 
@@ -236,9 +283,11 @@ def _open_stream_with_retry(open_fn, retries: int = 2, delay: float = 0.35):
     Bluetooth radio to switch profile (e.g. a headset's HFP mic and its
     separate A2DP speaker endpoint) can race Windows' teardown of the
     previous audio session, surfacing as a transient PaErrorCode -9999
-    ("WdmSyncIoctl"/host error). Giving it a moment to settle before
-    retrying resolves most of these without the caller having to fall back
-    to a different device."""
+    ("WdmSyncIoctl"/host error). A real HFP profile negotiation over the
+    Bluetooth radio (not just a driver-side teardown) can take well over a
+    second, so this retries for up to ~3 s total - a couple of quick
+    retries isn't enough time for that renegotiation to finish, which just
+    trades a slow failure for a needlessly confusing one."""
     last_exc: Optional[Exception] = None
     for attempt in range(retries + 1):
         try:

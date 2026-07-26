@@ -132,10 +132,30 @@ class TrayApp:
         switches both directions together - matching Windows' own sound
         picker instead of showing two confusingly-named entries for the
         same earbuds."""
-        from services.audio_service import get_audio_device_groups
+        from services.audio_service import (
+            _device_group_key, get_audio_device_groups, get_current_default_names,
+        )
+
+        # "System default" used to always show that literal label, even
+        # while it silently resolved to a specific device - which didn't
+        # match what Windows' own Sound Settings showed as the active
+        # device, and looked like nothing was actually selected. Show the
+        # real, currently-active device name(s) instead so what the tray
+        # displays always matches what Windows shows.
+        default_label = "System Default"
+        try:
+            default_in, default_out = get_current_default_names()
+            if default_in and default_out and _device_group_key(default_in) == _device_group_key(default_out):
+                default_label = f"System Default ({_device_group_key(default_in)})"
+            elif default_in and default_out:
+                default_label = f"System Default ({default_in} / {default_out})"
+            elif default_in or default_out:
+                default_label = f"System Default ({default_in or default_out})"
+        except Exception as exc:
+            log.debug("Could not resolve live default device names: %s", exc)
 
         yield pystray.MenuItem(
-            "(system default)",
+            default_label,
             self._make_device_action(None, None),
             checked=lambda item: (
                 self._session.current_input_device is None
