@@ -235,6 +235,20 @@ class VoiceSession:
             )
             self._mic.start()
             self._speaker.start()
+            # The requested name (or None/"system default") can differ from
+            # what PortAudio actually opened - e.g. _open_device_stream's
+            # DirectSound fallback silently substitutes a different host
+            # API entry for the same physical device on a WASAPI failure,
+            # or "system default" resolves to whatever Windows' live
+            # default is right now. Log the real, actually-opened
+            # device(s) so this never has to be guessed at when diagnosing
+            # a report like "the tray says X but the audio is clearly
+            # coming from Y".
+            log.info(
+                "Actual devices opened: mic=%s speaker=%s",
+                self._mic.actual_device_name or "(unknown)",
+                self._speaker.actual_device_name or "(unknown)",
+            )
         except Exception:
             # Don't leave a half-open stream behind on failure (e.g. an
             # ambiguous/unplugged device) - without this, self._mic could
@@ -341,6 +355,20 @@ class VoiceSession:
     def current_output_device(self) -> Optional[str]:
         """Currently configured speaker device name (None = system default)."""
         return self.config.audio.output_device
+
+    @property
+    def actual_input_device(self) -> Optional[str]:
+        """The mic device PortAudio is really using right now - read back
+        from the live stream, not the configured/requested name (see
+        MicCapture.actual_device_name for why these can differ). None if
+        no stream is currently open."""
+        return self._mic.actual_device_name if self._mic else None
+
+    @property
+    def actual_output_device(self) -> Optional[str]:
+        """The speaker device PortAudio is really using right now - see
+        actual_input_device. None if no stream is currently open."""
+        return self._speaker.actual_device_name if self._speaker else None
 
     def switch_devices(self, input_device: Optional[str], output_device: Optional[str]) -> None:
         """Hot-swap the input and/or output stream to new devices without

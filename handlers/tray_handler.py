@@ -169,9 +169,24 @@ class TrayApp:
             ),
         )
         def _is_current(group: dict) -> bool:
-            if group["input"] is not None and self._session.current_input_device != group["input"]:
+            # While audio is actually running, compare against the real,
+            # actually-opened device - not the configured/requested name.
+            # These can genuinely differ (see MicCapture.actual_device_name):
+            # a WASAPI open failure silently falls back to the same
+            # device's DirectSound entry, or "system default" resolves to
+            # whatever Windows' live default currently is. Trusting the
+            # configured name here is exactly what produced a checkmark on
+            # one device while Windows' own Sound Settings (and the audio
+            # actually being heard) showed a different one. When nothing is
+            # open yet (not connected), fall back to the configured name -
+            # it's the best available answer for "what will apply".
+            current_in = self._session.actual_input_device if self._session.is_audio_running \
+                else self._session.current_input_device
+            current_out = self._session.actual_output_device if self._session.is_audio_running \
+                else self._session.current_output_device
+            if group["input"] is not None and current_in != group["input"]:
                 return False
-            if group["output"] is not None and self._session.current_output_device != group["output"]:
+            if group["output"] is not None and current_out != group["output"]:
                 return False
             return True
 

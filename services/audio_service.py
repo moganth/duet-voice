@@ -487,6 +487,20 @@ class MicCapture:
         """Update mic amplification live - safe to call from any thread."""
         self._gain = float(value)
 
+    @property
+    def actual_device_name(self) -> Optional[str]:
+        """The real device PortAudio actually opened, read back from the
+        live stream rather than the name that was requested. These can
+        differ (e.g. the DirectSound fallback in _open_device_stream, or a
+        None/"system default" request resolving to a specific device) -
+        anything that displays "the current device" to the user MUST use
+        this, not the originally-requested name, or it can show something
+        Windows itself doesn't agree is actually active."""
+        try:
+            return sd.query_devices()[self._stream.device]["name"]
+        except Exception:
+            return None
+
 
 class SpeakerPlayback:
     """Pushes decoded int16 mono frames out to the speakers on demand."""
@@ -526,3 +540,12 @@ class SpeakerPlayback:
     def stop(self):
         self._stream.stop()
         self._stream.close()
+
+    @property
+    def actual_device_name(self) -> Optional[str]:
+        """See MicCapture.actual_device_name - the real device PortAudio
+        actually opened, not the name that was requested."""
+        try:
+            return sd.query_devices()[self._stream.device]["name"]
+        except Exception:
+            return None
